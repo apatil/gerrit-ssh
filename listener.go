@@ -1,11 +1,14 @@
 package gerritssh
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"log"
 
+	"github.com/pkg/errors"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -20,6 +23,7 @@ func New(url string, username string, sshKeyPath string) GerritSSH {
 		Username:   username,
 		SSHKeyPath: sshKeyPath,
 		URL:        url,
+		Debug:      true,
 	}
 
 	worker.Debug = false
@@ -36,44 +40,86 @@ type GerritSSH struct {
 	StopChan   chan bool
 	ResultChan chan StreamEvent
 	Debug      bool
-	session    *ssh.Session
-	conn       ssh.Conn
-	callback   func(event StreamEvent)
 }
 
 // StartStreamEvents starts stream event routine
-func (g *GerritSSH) StartStreamEvents() {
+func (g *GerritSSH) StartStreamEvents() error {
+	conn, session, err := g.sshSession()
+	if err != nil {
+		return err
+	}
+	stdoutPipe, err := session.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	stderrPipe, err := session.StderrPipe()
+	if err != nil {
+		return err
+	}
+	sessionScanner := bufio.NewScanner(stdoutPipe)
+
+	errChan := make(chan error)
 	go func() {
-		buffer := bytes.Buffer{}
 		if g.Debug {
-			log.Printf("Gerrit SSH: Start stream events")
+			fmt.Println("Starting stream-events")
 		}
-		go g.sshConnection("stream-events", &buffer)
+		err := session.Run("gerrit stream-events")
+		if err != nil {
+			if g.Debug {
+				fmt.Println("Gerrit-SSH: stream-events failed: " + err.Error())
+			}
+			stderrContent, err1 := ioutil.ReadAll(stderrPipe)
+			if err1 == nil {
+				if g.Debug {
+					fmt.Println("Gerrit-SSH: failed to get stderr of stream-events command")
+				}
+				stderrContent = []byte("")
+			}
+			session.Close()
+			conn.Close()
+			errChan <- errors.Wrap(err, "Gerrit SSH: stream-events failed: "+string(stderrContent))
+		}
+		if g.Debug {
+			fmt.Println("Gerrit-SSH: stream-events exited")
+		}
+		errChan <- errors.New("Gerrit SSH: stream-events exited")
+	}()
+	if g.Debug {
+		fmt.Println("Started processing stream events")
+	}
+	go func() {
+		defer conn.Close()
+		defer session.Close()
 
 		event := StreamEvent{}
-		for {
-			if buffer.Len() != 0 {
-				err := json.Unmarshal(buffer.Bytes(), &event)
-				if err == nil {
-					buffer.Reset()
-					if g.Debug {
-						log.Printf("Gerrit SSH: recived event: %v", event.Type)
-					}
-					g.ResultChan <- event
+		for sessionScanner.Scan() {
+			eventTxt := sessionScanner.Text()
+			err := json.Unmarshal([]byte(eventTxt), &event)
+			if err == nil {
+				if g.Debug {
+					log.Printf("Gerrit SSH: recived event: %v", event.Type)
+				}
+				g.ResultChan <- event
+			} else {
+				if g.Debug {
+					te := err.(*json.UnmarshalTypeError)
+					log.Printf("Gerrit SSH: could not parse event at offset %d: %s:\n %s", te.Offset, err.Error(), ":\n", eventTxt)
 				}
 			}
 			select {
+			case err := <-errChan:
+				log.Printf(err.Error())
+				return
 			case <-g.StopChan:
 				if g.Debug {
 					log.Printf("Gerrit SSH: Stop stream events")
 				}
-				g.session.Close()
-				g.conn.Close()
 				return
 			default:
 			}
 		}
 	}()
+	return nil
 }
 
 // StopStreamEvents stop stream event routine
@@ -85,53 +131,67 @@ func (g *GerritSSH) StopStreamEvents() {
 
 // Send command over SSH to gerrit instance
 func (g *GerritSSH) Send(command string) (string, error) {
-	return g.sshConnection(command, nil)
+	return g.sshCommand(command, nil)
 }
 
-// Internal ssh connection function
-func (g *GerritSSH) sshConnection(command string, buffer *bytes.Buffer) (string, error) {
+func (g *GerritSSH) sshSession() (*ssh.Client, *ssh.Session, error) {
 	// Read ssh key
+	if g.Debug {
+		fmt.Println("Reading private key")
+	}
 	pemBytes, err := ioutil.ReadFile(g.SSHKeyPath)
 	if err != nil {
 		log.Fatal(err)
-		return "", err
+		return nil, nil, err
+	}
+	if g.Debug {
+		fmt.Println("Parsing private key")
 	}
 	// Parse ssh key
 	signer, err := ssh.ParsePrivateKey(pemBytes)
 	if err != nil {
 		log.Fatalf("Gerrit SSH: parse key failed:%v", err)
-		return "", err
+		return nil, nil, err
 	}
-
 	// Create config
 	config := &ssh.ClientConfig{
 		User: g.Username,
 		Auth: []ssh.AuthMethod{
 			ssh.PublicKeys(signer),
 		},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+	}
+	if g.Debug {
+		fmt.Println("Dialing " + g.URL)
 	}
 	// Dial TCP
 	conn, err := ssh.Dial("tcp", g.URL, config)
 	if err != nil {
-		log.Fatalf("Gerrit SSH: dial failed:%v", err)
-		return "", err
+		return nil, nil, errors.Wrap(err, "Gerrit SSH: dial failed")
 	}
-	if command == "stream-events" {
-		g.conn = conn
+	if g.Debug {
+		fmt.Println("Connected, establishing session")
 	}
-	defer conn.Close()
 	// Start new session
 	session, err := conn.NewSession()
 	if err != nil {
-		log.Fatalf("Gerrit SSH: session failed:%v", err)
+		conn.Close()
+		return nil, nil, errors.Wrap(err, "Gerrit SSH: session create failed")
+	}
+	if g.Debug {
+		fmt.Println("Session established")
+	}
+
+	// defer session.Close()
+	return conn, session, nil
+}
+
+func (g *GerritSSH) sshCommand(command string, buffer *bytes.Buffer) (string, error) {
+	conn, session, err := g.sshSession()
+	if err != nil {
 		return "", err
 	}
-	if command == "stream-events" {
-		g.session = session
-	}
-	defer session.Close()
-
-	// Read to buffer
+	defer conn.Close()
 	if buffer != nil {
 		session.Stdout = buffer
 	} else {
@@ -139,12 +199,11 @@ func (g *GerritSSH) sshConnection(command string, buffer *bytes.Buffer) (string,
 		session.Stdout = buffer
 	}
 
-	// Run command
 	err = session.Run("gerrit " + command)
 	if err != nil {
 		log.Fatalf("Gerrit SSH: run failed:%v", err)
-		return "", err
+		return "", errors.Wrap(err, "Gerrit SSH: run failed")
 	}
-	// Return result
+
 	return buffer.String(), nil
 }

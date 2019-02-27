@@ -7,7 +7,7 @@ type Change struct {
 	Branch        string  `json:"branch,omitempty"`
 	Topic         string  `json:"topic,omitempty"`
 	ID            string  `json:"id,omitempty"`
-	Number        string  `json:"number,omitempty"`
+	Number        int     `json:"number,omitempty"`
 	Subject       string  `json:"subject,omitempty"`
 	Owner         Account `json:"owner,omitempty"`
 	URL           string  `json:"url,omitempty"`
@@ -50,7 +50,7 @@ type Account struct {
 // PatchSet - Refers to a specific patchset within a change.
 // https://gerrit-review.googlesource.com/Documentation/json.html#patchSet
 type PatchSet struct {
-	Number    string   `json:"number,omitempty"`
+	Number    int      `json:"number,omitempty"`
 	Revision  string   `json:"revision,omitempty"`
 	Parents   []string `json:"parents,omitempty"`
 	Ref       string   `json:"ref,omitempty"`
@@ -120,7 +120,7 @@ type Label struct {
 // https://gerrit-review.googlesource.com/Documentation/json.html#dependency
 type Dependency struct {
 	ID                string `json:"id,omitempty"`
-	Number            string `json:"number,omitempty"`
+	Number            int    `json:"number,omitempty"`
 	Revision          string `json:"revision,omitempty"`
 	Ref               string `json:"ref,omitempty"`
 	IsCurrentPatchSet bool   `json:"isCurrentPatchSet,omitempty"`
@@ -174,10 +174,10 @@ type StreamEvent struct {
 	Changer   Account `json:"changer,omitempty"`
 	Submitter Account `json:"submitter,omitempty"`
 	Restorer  Account `json:"restorer,omitempty"`
-	Author    Account `json:"author, omitempty"`
-	Uploader  Account `json:"uploader, omitempty"`
-	Editor    Account `json:"editor, omitempty"`
-	Reviewer  Account `json:"reviewer, omitempty"`
+	Author    Account `json:"author,omitempty"`
+	Uploader  Account `json:"uploader,omitempty"`
+	Editor    Account `json:"editor,omitempty"`
+	Reviewer  Account `json:"reviewer,omitempty"`
 
 	NewRev      string    `json:"newRev,omitempty"`
 	OldAssignee string    `json:"oldAssignee,omitempty"`
